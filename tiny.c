@@ -5,6 +5,30 @@
  */
 #include "csapp.h"
 
+#define MAX_CACHE_SIZE 10000
+typedef struct cache_object* cache_obj;
+
+/* Cache struct */
+struct cache_object {
+	char* name;
+    void* handle;
+	cache_obj next;
+    cache_obj prev;
+	int size;
+};
+
+struct cache_queue {
+	cache_obj front;
+	cache_obj back;
+	int size;
+	pthread_rwlock_t lock;
+};
+
+/*Global cache variable that is initialized with init_cache()*/
+struct cache_queue* cache;
+sem_t mutex;
+
+
 void* handle_request(void* arg);
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
@@ -15,6 +39,16 @@ void serve_dynamic(int fd, char *function_name, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, 
         char *shortmsg, char *longmsg);
 void cleanup(int fd);
+void init_cache();
+void add_to_cache(char* name, void* data, int size);
+void* search_cache(char* name);
+
+/*Lock wrapper functions*/
+void init_lock(pthread_rwlock_t* lock);
+void read_lock();
+void write_lock();
+void unlock();
+
 
 int main(int argc, char **argv) 
 {
@@ -23,6 +57,7 @@ int main(int argc, char **argv)
     struct sockaddr_in clientaddr;
     pthread_t tid;
 
+    init_cache();
     /* Check command line args */
     if (argc != 2) {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -224,7 +259,8 @@ void serve_dynamic(int fd, char *function_name, char *cgiargs)
     Rio_writen(fd, buf, strlen(buf));
 
     /* Execute the requested function */
-    handle = dlopen("./lib/libvector.so", RTLD_LAZY);
+    sprintf(buf, "./lib/%s.so", function_name);
+    handle = dlopen(buf, RTLD_LAZY);
 
     if (!handle) {
         sprintf(buf, "%s\n", dlerror());
@@ -294,3 +330,103 @@ void clienterror(int fd, char *cause, char *errnum,
     Rio_writen(fd, body, strlen(body));
 }
 /* $end clienterror */
+
+/******* CACHE FUNCTIONS ******/
+void init_cache() {
+	/*Create dummy node, initialize all fields to NULL or 0 */
+	cache_obj dummy_node = Calloc(1, sizeof(struct cache_object));
+    dummy_node->name = NULL;
+    dummy_node->handle = NULL;
+    dummy_node->next = NULL;
+    dummy_node->prev = NULL;
+    dummy_node->size = 0;
+	
+	cache = Malloc(sizeof(struct cache_queue));
+	cache->front = dummy_node;
+	cache->back = dummy_node;
+	cache->size = 0;
+	init_lock(&cache->lock);
+}
+
+void add_to_cache(char* name, void* handle, int size) {
+	P(&mutex);
+	write_lock();
+	/*Evicts if necessary until there is enough space to cache */
+	while ((MAX_CACHE_SIZE - cache->size) < size) {
+		cache_obj first = cache->front->next;
+		cache->front->next = first->next;
+		cache->size -= first->size;
+        free(first->name);
+		free(first);
+    }
+	/*Initialize fields of new_node */
+	cache_obj new_node = Malloc(sizeof(struct cache_object));
+	new_node->name = name;
+	new_node->handle = handle;
+	new_node->size = size;
+	new_node->next = NULL;
+    new_node->prev = cache->back;
+	
+	/*Add it to the back of cache*/
+	cache->back->next = new_node;
+	cache->back = new_node;
+	cache->size += size;
+	unlock();
+	V(&mutex);
+}
+
+void* search_cache(char* name) {
+	read_lock();
+	cache_obj cur = cache->front->next;
+	for (; cur; cur = cur->next) {
+		/*If next matches key, object is found */
+		if (!strcmp(cur->name, name)) {
+			P(&mutex);
+			unlock(); /* Unlocks the read lock*/
+
+			/* Takes the write lock to move to the end of the cache */
+			write_lock();
+			cur->prev->next = cur->next;
+            if (cur->next != NULL)
+                cur->next->prev = cur->prev;
+			cache->back->next = cur;
+			cache->back = cur;
+			cur->next = NULL;
+			unlock(); /* Unlocks the write lock */
+			V(&mutex);
+			return cur->handle;
+		}
+	}
+	/*If reached here, key not found in cache. */
+	unlock();
+	return NULL;
+}
+
+/******* LOCK WRAPPER FUNCTIONS ******/
+void init_lock(pthread_rwlock_t* lock) {
+	if (pthread_rwlock_init(lock, NULL) != 0) {
+		fprintf(stderr, "Error: Init lock failed.\n");
+		exit(-1);
+	}
+}
+
+void write_lock() {
+	if (pthread_rwlock_wrlock((pthread_rwlock_t*) (&cache->lock)) != 0) {
+		fprintf(stderr, "Error: Write lock failed.\n");
+		exit(-1);
+	}
+}
+
+void read_lock() {
+	if (pthread_rwlock_rdlock((pthread_rwlock_t*) (&cache->lock)) != 0) {
+		fprintf(stderr, "Error: Read lock failed.\n");
+		exit(-1);
+	}
+}
+
+void unlock() {
+	if (pthread_rwlock_unlock((pthread_rwlock_t*) (&cache->lock)) != 0) {
+		fprintf(stderr, "Error: Unlock failed.\n");
+		exit(-1);
+	}
+}

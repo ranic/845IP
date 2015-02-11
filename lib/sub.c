@@ -1,12 +1,12 @@
 /*
- * adder.c - a minimal CGI program that adds two numbers together
+ * sub.c - a minimal CGI program that subtracts two numbers
  */
-/* $begin adder */
+/* $begin sub */
 
 #include "csapp.h"
 
 /* Adds two numbers and writes them out */
-void add(int fd, char* args) {
+void sub(int fd, char* args) {
     char *p;
     char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
     int n1=0, n2=0;
@@ -20,8 +20,8 @@ void add(int fd, char* args) {
     n2 = atoi(arg2);
 
     /* Make the response body */
-    sprintf(content, "%sThe answer is: %d + %d = %d\r\n<p>", 
-            content, n1, n2, n1+n2);
+    sprintf(content, "%sThe answer is: %d - %d = %d\r\n<p>", 
+            content, n1, n2, n1-n2);
     sprintf(content, "%sThanks for visiting!\r\n", content);
 
     /* Generate the HTTP response */
@@ -30,4 +30,3 @@ void add(int fd, char* args) {
     write(fd, content, strlen(content));
     return;
 }
-
