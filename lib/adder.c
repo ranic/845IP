@@ -6,7 +6,7 @@
 #include "csapp.h"
 
 /* Adds two numbers and writes them out */
-void add(int fd, char* args) {
+void adder(int fd, char* args) {
     char *p;
     char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
     int n1=0, n2=0;
@@ -27,7 +27,8 @@ void add(int fd, char* args) {
     /* Generate the HTTP response */
     printf("Content-length: %lu\r\n", strlen(content));
     printf("Content-type: text/html\r\n\r\n");
-    write(fd, content, strlen(content));
+    printf("Content: %s\n", content);
+    Rio_writen(fd, content, strlen(content));
     return;
 }
 

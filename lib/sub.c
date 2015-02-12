@@ -27,6 +27,8 @@ void sub(int fd, char* args) {
     /* Generate the HTTP response */
     printf("Content-length: %lu\r\n", strlen(content));
     printf("Content-type: text/html\r\n\r\n");
-    write(fd, content, strlen(content));
+    Rio_writen(fd, content, strlen(content));
+
+    printf("Done running sub function!\n");
     return;
 }
