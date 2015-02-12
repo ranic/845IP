@@ -5,29 +5,6 @@
  */
 #include "csapp.h"
 
-#define MAX_CACHE_SIZE 10000
-typedef struct cache_object* cache_obj;
-
-/* Cache struct */
-struct cache_object {
-	char* name;
-    void* handle;
-	cache_obj next;
-	int size;
-};
-
-struct cache_queue {
-	cache_obj front;
-	cache_obj back;
-	int size;
-	pthread_rwlock_t lock;
-};
-
-/*Global cache variable that is initialized with init_cache()*/
-struct cache_queue* cache;
-char scratch[MAXLINE];
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-
 void* handle_request(void* arg);
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
@@ -38,17 +15,6 @@ void serve_dynamic(int fd, char *function_name, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, 
         char *shortmsg, char *longmsg);
 void cleanup(int fd);
-void init_cache();
-void* add_to_cache(char* name, void* handle, int size);
-void* search_cache(char* name, int fd, char* cgiargs);
-cache_obj create_node(char* name, void* handle, int size);
-void evict_lru();
-/*Lock wrapper functions*/
-void init_lock(pthread_rwlock_t* lock);
-void read_lock();
-void write_lock();
-void unlock();
-
 
 int main(int argc, char **argv) 
 {
@@ -56,10 +22,7 @@ int main(int argc, char **argv)
     int* connfd_ptr;
     struct sockaddr_in clientaddr;
     pthread_t tid;
-    
-    printf("%x\n", mutex);
 
-    init_cache();
     /* Check command line args */
     if (argc != 2) {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
@@ -117,12 +80,14 @@ void doit(int fd)
 
     /* Parse URI from GET request */
     is_static = parse_uri(uri, function_name, cgiargs);
-    if (stat(function_name, &sbuf) < 0 && is_static) {
+    #ifdef OLD
+    if (stat(function_name, &sbuf) < 0) {
         clienterror(fd, function_name, "404", "Not found",
                 "Tiny couldn't find this file");
         cleanup(fd);
         return;
     }
+    #endif
     if (is_static) { /* Serve static content */
         if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
             clienterror(fd, function_name, "403", "Forbidden",
@@ -240,12 +205,6 @@ void get_filetype(char *function_name, char *filetype)
 }  
 /* $end serve_static */
 
-size_t getfilesize(char* filename) {
-    struct stat st;
-    stat(filename, &st);
-    return st.st_size;
-}
-
 /*
  * serve_dynamic - run a CGI program on behalf of the client
  */
@@ -257,57 +216,49 @@ void serve_dynamic(int fd, char *function_name, char *cgiargs)
     void *handle;
     void (*function)(int, char*);
     char *error; 
-    size_t size;
-
-    sprintf(buf, "Hello\n");
-    write(fd, buf, strlen(buf));
 
     /* Return first part of HTTP response */
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
-    write(fd, buf, strlen(buf));
+    Rio_writen(fd, buf, strlen(buf));
     sprintf(buf, "Server: Tiny Web Server\r\n");
-    write(fd, buf, strlen(buf));
-    
-    //#ifdef OLD
-    /* search_cache finds and evaluates function if cached */
-    if ((function = search_cache(function_name, fd, cgiargs)) == NULL) {
-        /* else... add to cache and execute here */
-        pthread_mutex_lock(&mutex);
-        sleep(5);
-        printf("Didn't find in cache, opening file\n");
-        /* DL_Open the corresponding .so file */
-        sprintf(buf, "./lib/%s.so", function_name);
-        size = getfilesize(buf);
-        if ((handle = dlopen(buf, RTLD_LAZY)) == NULL) {
-            sprintf(buf, "%s\n", dlerror());
-            write(fd, buf, strlen(buf));
-            return;
-        }
+    Rio_writen(fd, buf, strlen(buf));
 
-        printf("Opened file and got handle to function\n");
-        /* Get the function (from dlysm) and add to cache */
-        function = (void (*)(int, char*)) add_to_cache(function_name, handle, size);
+    /* Execute the requested function */
+    handle = dlopen("./lib/libvector.so", RTLD_LAZY);
 
-        if ((error = dlerror()) != NULL) {
-            printf("Invalid function error: %s %s\n", function_name, error);
-            sprintf(buf, "Invalid function %s\n", function_name);
-            Rio_writen(fd, buf, strlen(buf));
-            return;
-        }
-        
-        printf("About to execute function\n");
-        /* Execute the function */
-        if (function != NULL) {
-           function(fd, cgiargs);
-        }
-
-        printf("done with function, about to release mutex\n");
-
-        /* At this point the function is complete and in the cache */
-        pthread_mutex_unlock(&mutex);
-        printf("released mutex, served client\n");
+    if (!handle) {
+        sprintf(buf, "%s\n", dlerror());
+        Rio_writen(fd, buf, strlen(buf));
+        return;
     }
-    //#endif
+    
+    printf("function_name: %s, cgiargs: %s\n", function_name, cgiargs);
+    /* Get a pointer to the function we just loaded */
+    function = dlsym(handle, function_name);
+    if ((error = dlerror()) != NULL) {
+        sprintf(buf, "Invalid function %s\n", function_name);
+        Rio_writen(fd, buf, strlen(buf));
+        return;
+    }
+
+    /* Call the function */
+    function(fd, cgiargs);
+
+    /* unload the shared library */
+    if (dlclose(handle) < 0) {
+        fprintf(stderr, "%s\n", dlerror());
+        exit(1);
+    }
+    #ifdef OLD
+    if (Fork() == 0) { /* child */
+        /* Real server would set all CGI vars here */
+        printf("Serving dynamic content in child process.\n");
+        setenv("QUERY_STRING", cgiargs, 1); 
+        Dup2(fd, STDOUT_FILENO);         /* Redirect stdout to client */
+        Execve(function_name, emptylist, environ); /* Run CGI program */
+    }
+    Wait(NULL); /* Parent waits for and reaps child */
+    #endif
 }
 /* $end serve_dynamic */
 
@@ -343,144 +294,3 @@ void clienterror(int fd, char *cause, char *errnum,
     Rio_writen(fd, body, strlen(body));
 }
 /* $end clienterror */
-
-/******* CACHE FUNCTIONS ******/
-void init_cache() {
-	/*Create dummy node, initialize all fields to NULL or 0 */
-	cache_obj dummy_node = Calloc(1, sizeof(struct cache_object));
-    dummy_node->name = NULL;
-    dummy_node->handle = NULL;
-    dummy_node->next = NULL;
-    dummy_node->size = 0;
-	
-	cache = Malloc(sizeof(struct cache_queue));
-	cache->front = dummy_node;
-	cache->back = dummy_node;
-	cache->size = 0;
-	init_lock(&cache->lock);
-}
-
-/* Always called under protection of mutex */
-void evict_lru() {
-    cache_obj first = cache->front->next;
-    cache->front->next = first->next;
-    if (first == cache->back)
-        cache->back = cache->front;
-    cache->size -= first->size;
-
-    /* unload the shared library */
-    if (dlclose(first->handle) < 0) {
-        fprintf(stderr, "%s\n", dlerror());
-    }
-
-    free(first->name);
-    free(first);
-}
-
-cache_obj create_node(char* name, void* handle, int size) {
-	cache_obj new_node = Malloc(sizeof(struct cache_object));
-
-    new_node->name = Calloc(strlen(name)+1, sizeof(char));
-    strncpy(new_node->name, name, strlen(name));
-
-	new_node->handle = handle;
-	new_node->size = size;
-	new_node->next = NULL;
-	
-    return new_node;
-}
-
-/* Always called under protection of mutex */
-void* add_to_cache(char* name, void* handle, int size) {
-    void* function;
-	write_lock();
-    printf("Took write lock in add_to_cache\n");
-	/*Evicts if necessary until there is enough space to cache */
-	while (cache->size > MAX_CACHE_SIZE) 
-        evict_lru();
-
-    /* Create new node and add to back of cache */
-    cache_obj new_node = create_node(name, handle, size);
-	cache->back->next = new_node;
-	cache->back = new_node;
-	cache->size += size;
-	unlock();
-
-    /* Open the shared library containing function name */
-    sprintf(scratch, "./lib/%s.so", name);
-    
-    /* Resolve the function */
-    function = dlsym(handle, name);
-    printf("Released write lock in add to cache and exiting\n");
-    return function;
-}
-
-void* search_cache(char* name, int fd, char* cgiargs) {
-    void (*function)(int, char*);
-
-	read_lock();
-	cache_obj cur = cache->front->next;
-    cache_obj prev = cache->front;
-	for (; cur; cur = cur->next) {
-		/*If next matches key, object is found */
-		if (!strcmp(cur->name, name)) {
-			pthread_mutex_lock(&mutex);
-			unlock(); /* Unlocks the read lock*/
-            if (cur != cache->back) {
-                /* Takes the write lock to move to the end of the cache */
-                write_lock();
-                prev->next = cur->next;
-                cache->back->next = cur;
-                cache->back = cur;
-                cur->next = NULL;
-                unlock(); /* Unlocks the write lock */
-            }
-            
-            /* Found in the cache, get and execute function */
-            function = dlsym(cur->handle, name);
-
-            if (dlerror() != NULL) {
-                sprintf(scratch, "Invalid function %s\n", name);
-                Rio_writen(fd, scratch, strlen(scratch));
-                return NULL;
-            }
-
-            function(fd, cgiargs);
-            pthread_mutex_unlock(&mutex);
-			return cur->handle;
-		}
-        prev = cur;
-	}
-	/*If reached here, key not found in cache. */
-	unlock();
-	return NULL;
-}
-
-/******* LOCK WRAPPER FUNCTIONS ******/
-void init_lock(pthread_rwlock_t* lock) {
-	if (pthread_rwlock_init(lock, NULL) != 0) {
-		fprintf(stderr, "Error: Init lock failed.\n");
-		exit(-1);
-	}
-}
-
-void write_lock() {
-	if (pthread_rwlock_wrlock((pthread_rwlock_t*) (&cache->lock)) != 0) {
-		fprintf(stderr, "Error: Write lock failed.\n");
-		exit(-1);
-	}
-}
-
-void read_lock() {
-	if (pthread_rwlock_rdlock((pthread_rwlock_t*) (&cache->lock)) != 0) {
-		fprintf(stderr, "Error: Read lock failed.\n");
-		exit(-1);
-	}
-}
-
-void unlock() {
-	if (pthread_rwlock_unlock((pthread_rwlock_t*) (&cache->lock)) != 0) {
-		fprintf(stderr, "Error: Unlock failed.\n");
-		exit(-1);
-	}
-}
