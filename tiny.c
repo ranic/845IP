@@ -5,7 +5,7 @@
  */
 #include "csapp.h"
 
-#define MAX_CACHE_SIZE 10000
+#define MAX_CACHE_SIZE 20000
 typedef struct cache_object* cache_obj;
 
 /* Cache struct */
@@ -273,7 +273,6 @@ void serve_dynamic(int fd, char *function_name, char *cgiargs)
     if ((function = search_cache(function_name, fd, cgiargs)) == NULL) {
         /* else... add to cache and execute here */
         pthread_mutex_lock(&mutex);
-        sleep(5);
         printf("Didn't find in cache, opening file\n");
         /* DL_Open the corresponding .so file */
         sprintf(buf, "./lib/%s.so", function_name);
@@ -295,13 +294,10 @@ void serve_dynamic(int fd, char *function_name, char *cgiargs)
             return;
         }
         
-        printf("About to execute function\n");
         /* Execute the function */
         if (function != NULL) {
            function(fd, cgiargs);
         }
-
-        printf("done with function, about to release mutex\n");
 
         /* At this point the function is complete and in the cache */
         pthread_mutex_unlock(&mutex);
@@ -368,6 +364,7 @@ void evict_lru() {
         cache->back = cache->front;
     cache->size -= first->size;
 
+    printf("Evicting %s from the cache.\n", first->name);
     /* unload the shared library */
     if (dlclose(first->handle) < 0) {
         fprintf(stderr, "%s\n", dlerror());
@@ -394,7 +391,7 @@ cache_obj create_node(char* name, void* handle, int size) {
 void* add_to_cache(char* name, void* handle, int size) {
     void* function;
 	write_lock();
-    printf("Took write lock in add_to_cache\n");
+    printf("Adding %s to cache.\n", name);
 	/*Evicts if necessary until there is enough space to cache */
 	while (cache->size > MAX_CACHE_SIZE) 
         evict_lru();
@@ -411,7 +408,7 @@ void* add_to_cache(char* name, void* handle, int size) {
     
     /* Resolve the function */
     function = dlsym(handle, name);
-    printf("Released write lock in add to cache and exiting\n");
+    printf("Done adding %s to cache\n", name);
     return function;
 }
 

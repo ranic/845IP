@@ -14,7 +14,7 @@ int fibonacci(int n) {
 }
 
 /* Adds two numbers and writes them out */
-void adder(int fd, char* args) {
+void adder18(int fd, char* args) {
     char *p;
     char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
     int n1=0, n2=0;
